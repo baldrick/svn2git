@@ -26,9 +26,13 @@ module Svn2Git
       else
         clone!
       end
-      fix_tags
-      fix_branches
-      fix_trunk
+      if ! @options[:nofix]
+        fix_tags
+        fix_branches
+        fix_trunk
+      else
+        puts "Not fixing tags / branches / trunk as --nofix specified."
+      end
       optimize_repos
     end
 
@@ -45,6 +49,8 @@ module Svn2Git
       options[:exclude] = []
       options[:revision] = nil
       options[:username] = nil
+      options[:nofix] = false
+      options[:dryrun] = false
 
       if File.exists?(File.expand_path(DEFAULT_AUTHORS_FILE))
         options[:authors] = DEFAULT_AUTHORS_FILE
@@ -115,6 +121,14 @@ module Svn2Git
 
         opts.on('--exclude REGEX', 'Specify a Perl regular expression to filter paths when fetching; can be used multiple times') do |regex|
           options[:exclude] << regex
+        end
+
+        opts.on('--nofix', 'Clone the svn repository but don''t fix the tags / branches - useful to investigate when tag / branch names conflict') do
+          options[:nofix] = true
+        end
+
+        opts.on('--dryrun', 'Do a dry-run: don''t run any commands that would create any content') do
+          options[:dryrun] = true
         end
 
         opts.on('-v', '--verbose', 'Be verbose in logging -- useful for debugging issues') do
@@ -202,19 +216,43 @@ module Svn2Git
     def get_branches
       # Get the list of local and remote branches, taking care to ignore console color codes and ignoring the
       # '*' character used to indicate the currently selected branch.
-      @local = run_command("git branch -l --no-color").split(/\n/).collect{ |b| b.gsub(/\*/,'').strip }
-      @remote = run_command("git branch -r --no-color").split(/\n/).collect{ |b| b.gsub(/\*/,'').strip }
+      @local = run_command_now("git branch -l --no-color").split(/\n/).collect{ |b| b.gsub(/\*/,'').strip }
+      @remote = run_command_now("git branch -r --no-color").split(/\n/).collect{ |b| b.gsub(/\*/,'').strip }
+      puts "Local branches:-"
+      @local.each do |branch|
+        puts "    #{branch}"
+      end
 
       # Tags are remote branches that start with "tags/".
       @tags = @remote.find_all { |b| b.strip =~ %r{^svn\/tags\/} }
+      puts "Tags:-"
+      @tags.each do |tag|
+        puts "    #{tag}"
+      end
+
+      # svn branches are remote branches that aren't tags...
+      @svn_branches = @remote.find_all { |b| not @tags.include?(b) }
+      puts "svn branches:-"
+      @svn_branches.each do |svn_branch|
+        puts "    #{svn_branch}"
+      end
     end
 
     def fix_tags
       @tags.each do |tag|
+        puts "Fixing tag #{tag}"
         tag = tag.strip
         id = tag.gsub(%r{^svn\/tags\/}, '').strip
-        subject = run_command("git log -1 --pretty=format:'%s' #{tag}")
-        date = run_command("git log -1 --pretty=format:'%ci' #{tag}")
+        if @svn_branches.include?("svn/#{id}")
+          puts "Tag #{id} conflicts with one of the svn branches - postfixing the tag with -tag"
+          id = "#{id}-tag"
+          if @svn_branches.include?("svn/#{id}")
+            puts "Postfixed tag #{id} conflicts with one of the svn branches - exiting"
+            exit -1
+          end
+        end
+        subject = run_command_now("git log -1 --pretty=format:'%s' #{tag}")
+        date = run_command_now("git log -1 --pretty=format:'%ci' #{tag}")
         subject = escape_quotes(subject)
         date = escape_quotes(date)
         id = escape_quotes(id)
@@ -224,14 +262,11 @@ module Svn2Git
     end
 
     def fix_branches
-      svn_branches = @remote.find_all { |b| not @tags.include?(b) }
-      svn_branches = @remote.find_all { |b| b.strip =~ %r{^svn\/} }
-
       if @options[:rebase]
          run_command("git svn fetch")
       end
 
-      svn_branches.each do |branch|
+      @svn_branches.each do |branch|
         branch = branch.gsub(/^svn\//,'').strip
         if @options[:rebase] && (@local.include?(branch) || branch == 'trunk')
            lbranch = branch
@@ -262,7 +297,7 @@ module Svn2Git
       run_command("git gc")
     end
 
-    def run_command(cmd)
+    def run_command_now(cmd)
       log "Running command: #{cmd}"
 
       ret = ''
@@ -277,6 +312,14 @@ module Svn2Git
       ret
     end
 
+    def run_command(cmd)
+      if @options[:dryrun]
+        puts "Would run command: #{cmd}"
+      else
+        run_command_now(cmd)
+      end
+    end
+
     def log(msg)
       puts msg if @options[:verbose]
     end
@@ -288,7 +331,7 @@ module Svn2Git
     end
 
     def verify_working_tree_is_clean
-      status = run_command('git status --porcelain --untracked-files=no')
+      status = run_command_now('git status --porcelain --untracked-files=no')
       unless status.strip == ''
         puts 'You have local pending changes.  The working tree must be clean in order to continue.'
         exit -1
