@@ -1,3 +1,5 @@
-# Build And Install the svn2git gem
+#!/bin/sh
+
+# Build and install the gem
 gem build svn2git.gemspec
-gem install svn2git
+sudo gem install svn2git
